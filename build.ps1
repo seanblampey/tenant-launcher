@@ -36,6 +36,7 @@ Invoke-Native 'PyInstaller' {
         --hidden-import pyotp `
         --add-data "customers.example.csv;." `
         --add-data "assets\icon.ico;assets" `
+        --add-data "assets\icon-256.png;assets" `
         --icon "assets\icon.ico" `
         --add-binary "bin\bw.exe;bin" `
         --log-level WARN `

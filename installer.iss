@@ -34,4 +34,6 @@ Name: "{group}\Tenant Launcher"; Filename: "{app}\TenantLauncher.exe"
 Name: "{autodesktop}\Tenant Launcher"; Filename: "{app}\TenantLauncher.exe"; Tasks: desktopicon
 
 [Run]
+; Refresh Explorer's icon cache so an upgraded exe shows its new icon on shortcuts/taskbar
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden nowait skipifdoesntexist
 Filename: "{app}\TenantLauncher.exe"; Description: "Start Tenant Launcher"; Flags: nowait postinstall skipifsilent

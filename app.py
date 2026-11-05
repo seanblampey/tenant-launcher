@@ -6,6 +6,7 @@ Customers are auto-discovered from Bitwarden items whose name starts with a pref
 """
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -14,13 +15,78 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 import bw
-from common import (APP_VERSION, CSV_PATH, DEFAULT_ITEM_PREFIX, FROZEN, PORTALS, ROOT, Customer,
+from common import (APP_VERSION, CSV_PATH, DATA_DIR, DEFAULT_ITEM_PREFIX, FROZEN, PORTALS, ROOT, Customer,
                     load_customers, load_settings, resource_path, save_customers, save_settings)
 
 PYTHONW = Path(sys.executable).with_name("pythonw.exe")
 if not PYTHONW.exists():
     PYTHONW = Path(sys.executable)
 WORKER = ROOT / "login_worker.py"
+LOG_PATH = DATA_DIR / "app.log"
+APP_USER_MODEL_ID = "XenexSystems.TenantLauncher"
+
+
+def log_exception(where: str, exc: BaseException) -> None:
+    """Windowed exes have no console, so anything unexpected goes to %LOCALAPPDATA%\\TenantLauncher\\app.log."""
+    try:
+        import time
+        import traceback
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {where}: {''.join(traceback.format_exception(exc)).strip()}\n")
+    except Exception:
+        pass
+
+
+def _errmsg(exc: BaseException) -> str:
+    """Text for the user. Non-Bitwarden errors also get logged with their traceback."""
+    if isinstance(exc, bw.BwError):
+        return str(exc)
+    log_exception("background task", exc)
+    return f"{type(exc).__name__}: {exc}  (details in {LOG_PATH})"
+
+
+def _install_crash_logging() -> None:
+    sys.excepthook = lambda t, v, tb: log_exception("unhandled", v)
+    threading.excepthook = lambda args: log_exception(f"thread {args.thread.name}", args.exc_value)
+
+
+class UiQueue:
+    """Thread-safe way to run callables on the Tk main thread. Background threads must never
+    touch Tk directly (not even widget.after), so they hand work to this queue instead."""
+
+    def __init__(self, widget):
+        self._w = widget
+        self._q: queue.Queue = queue.Queue()
+        widget.after(40, self._pump)
+
+    def __call__(self, fn) -> None:
+        self._q.put(fn)
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                fn = self._q.get_nowait()
+                try:
+                    fn()
+                except Exception as e:
+                    log_exception("ui task", e)
+        except queue.Empty:
+            pass
+        try:
+            if self._w.winfo_exists():
+                self._w.after(40, self._pump)
+        except Exception:
+            pass
+
+
+def _set_app_user_model_id() -> None:
+    """Give the process its own taskbar identity so Windows uses this app's icon, not a cached/generic one."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 
 class SignInDialog(tk.Toplevel):
@@ -57,6 +123,7 @@ class SignInDialog(tk.Toplevel):
         self.ok = ttk.Button(btns, text="Sign in", command=lambda: self.submit()); self.ok.pack(side="right")
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
         self.bind("<Return>", lambda _e: self.submit())
+        self.ui = UiQueue(self)
         (self.pw_entry if email else self.email_entry).focus_set()
         self.update_idletasks()
         x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
@@ -83,11 +150,11 @@ class SignInDialog(tk.Toplevel):
         def work():
             try:
                 sess = bw.login(email, pw, method, code)
-                self.after(0, lambda: self._done(sess, email))
+                self.ui(lambda: self._done(sess, email))
             except bw.TwoStepRequired as e:
-                self.after(0, lambda: self._ask_code(e))
-            except bw.BwError as e:
-                self.after(0, lambda: self._error(str(e)))
+                self.ui(lambda e=e: self._ask_code(e))
+            except Exception as e:
+                self.ui(lambda m=_errmsg(e): self._error(m))
         threading.Thread(target=work, daemon=True).start()
 
     def _ask_code(self, exc: "bw.TwoStepRequired"):
@@ -109,11 +176,11 @@ class SignInDialog(tk.Toplevel):
         def work():
             try:
                 bw.send_email_code(email, pw)
-                self.after(0, lambda: self.msg.config(text="Code emailed. Enter it and press Sign in.", foreground="#333"))
-            except bw.BwError as e:
-                self.after(0, lambda: self.msg.config(text=str(e), foreground="#b00"))
+                self.ui(lambda: self.msg.config(text="Code emailed. Enter it and press Sign in.", foreground="#333"))
+            except Exception as e:
+                self.ui(lambda m=_errmsg(e): self.msg.config(text=m, foreground="#b00"))
             finally:
-                self.after(0, lambda: self.send_btn.state(["!disabled"]))
+                self.ui(lambda: self.send_btn.state(["!disabled"]))
         threading.Thread(target=work, daemon=True).start()
 
     def _error(self, text: str):
@@ -126,12 +193,17 @@ class SignInDialog(tk.Toplevel):
 
 class App(tk.Tk):
     def __init__(self):
+        _install_crash_logging()
+        _set_app_user_model_id()          # must happen before the first window exists
         super().__init__()
+        self.report_callback_exception = lambda t, v, tb: log_exception("tk callback", v)
         self.title(f"Tenant Launcher {APP_VERSION}")
         try:
             self.iconbitmap(default=str(resource_path("assets/icon.ico")))
-        except Exception:
-            pass
+            self._icon_img = tk.PhotoImage(file=str(resource_path("assets/icon-256.png")))
+            self.iconphoto(True, self._icon_img)   # big + small window icons (what the taskbar shows)
+        except Exception as e:
+            log_exception("window icon", e)
         self.geometry("600x560")
         self.minsize(480, 400)
         self.session: str | None = None
@@ -140,6 +212,7 @@ class App(tk.Tk):
         self.customers: list[Customer] = []
         self.settings = load_settings()
         self._build()
+        self.ui = UiQueue(self)
         self.reload()
         self.after(150, self.ensure_unlocked)
 
@@ -258,13 +331,14 @@ class App(tk.Tk):
         if not pw:
             dlg.msg.config(text="Master password is required.", foreground="#b00"); return
         dlg.ok.state(["disabled"]); dlg.msg.config(text="Unlocking...", foreground="#333"); dlg.update_idletasks()
+        email = dlg.email.get().strip()
 
         def work():
             try:
                 sess = bw.unlock(pw)
-                dlg.after(0, lambda: dlg._done(sess, dlg.email.get().strip()))
-            except bw.BwError as e:
-                dlg.after(0, lambda: dlg._error(str(e)))
+                dlg.ui(lambda: dlg._done(sess, email))
+            except Exception as e:
+                dlg.ui(lambda m=_errmsg(e): dlg._error(m))
         threading.Thread(target=work, daemon=True).start()
 
     def sign_out(self):
@@ -288,10 +362,10 @@ class App(tk.Tk):
         try:
             items = bw.list_login_items(self.session)
         except Exception as e:
-            self.after(0, lambda: self.set_status(f"Vault cache failed, launches will ask bw directly ({e})"))
+            self.ui(lambda m=_errmsg(e): self.set_status(f"Vault cache failed, launches will ask bw directly ({m})"))
             return
         self.items = items
-        self.after(0, lambda: (self.set_status(done_msg), self.auto_add(quiet=True)))
+        self.ui(lambda: (self.set_status(done_msg), self.auto_add(quiet=True)))
 
     def cached_item(self, c: Customer) -> dict | None:
         if c.bitwarden_item in self.items:
@@ -306,8 +380,8 @@ class App(tk.Tk):
         def run():
             try:
                 bw.sync(self.session); self._load_items("Vault synced.")
-            except bw.BwError as e:
-                self.after(0, lambda: self.set_status(f"Sync failed: {e}"))
+            except Exception as e:
+                self.ui(lambda m=_errmsg(e): self.set_status(f"Sync failed: {m}"))
         threading.Thread(target=run, daemon=True).start()
 
     # ---------- customers ----------
