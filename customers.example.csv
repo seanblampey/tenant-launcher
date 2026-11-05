@@ -1,0 +1,3 @@
+Name,BitwardenItem,Notes
+# Normally you never edit this: the app auto-adds Bitwarden items whose name starts with "O365 -".
+# Name = what shows in the list, BitwardenItem = Bitwarden item ID (or exact item name).

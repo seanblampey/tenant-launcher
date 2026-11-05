@@ -1,0 +1,17 @@
+# customer list and generated shortcuts contain customer names - never commit
+customers.csv
+Shortcuts/
+
+# bundled Bitwarden CLI (fetched by Get-BwCli.ps1, 128 MB)
+bin/
+
+# build output
+build/
+dist/
+installer/
+*.spec
+__pycache__/
+*.pyc
+
+# legacy launcher kept locally only
+Launch-Tenant.ps1

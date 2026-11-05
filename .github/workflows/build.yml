@@ -1,0 +1,45 @@
+name: Build installer
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch Bitwarden CLI
+        shell: pwsh
+        run: .\Get-BwCli.ps1
+
+      - name: Build exe + installer
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path common.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TenantLauncher-Setup-${{ steps.ver.outputs.version }}
+          path: installer/*.exe
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/*.exe
+          generate_release_notes: true
