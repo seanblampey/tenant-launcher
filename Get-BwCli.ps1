@@ -2,7 +2,8 @@
 .SYNOPSIS
   Puts the Bitwarden CLI (bw.exe) in bin\ so the build can bundle it.
   Uses an existing install (chocolatey / PATH) if present, otherwise downloads the
-  official release from github.com/bitwarden/clients.
+  official release from github.com/bitwarden/clients (with retries - the release CDN
+  occasionally answers 504).
 
   .\Get-BwCli.ps1                 # latest
   .\Get-BwCli.ps1 -Version 2026.10.0
@@ -11,6 +12,7 @@ param([string]$Version)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 New-Item -ItemType Directory -Force bin | Out-Null
+$headers = @{ 'User-Agent' = 'TenantLauncher-build' }
 
 $local = @(
     "$env:ProgramData\chocolatey\lib\bitwarden-cli\tools\bw.exe",
@@ -23,15 +25,28 @@ if ($local -and -not $Version) {
     return
 }
 
+function Invoke-WithRetry([string]$What, [scriptblock]$Block, [int]$Tries = 5) {
+    for ($i = 1; $i -le $Tries; $i++) {
+        try { return & $Block }
+        catch {
+            if ($i -eq $Tries) { throw }
+            $wait = 10 * $i
+            Write-Host "$What failed (attempt $i/$Tries): $($_.Exception.Message) - retrying in ${wait}s" -ForegroundColor Yellow
+            Start-Sleep -Seconds $wait
+        }
+    }
+}
+
 if (-not $Version) {
-    $rel = Invoke-RestMethod 'https://api.github.com/repos/bitwarden/clients/releases?per_page=50' -Headers @{ 'User-Agent' = 'TenantLauncher-build' }
+    $rel = Invoke-WithRetry 'Release lookup' { Invoke-RestMethod 'https://api.github.com/repos/bitwarden/clients/releases?per_page=50' -Headers $headers }
     $cli = $rel | Where-Object { $_.tag_name -like 'cli-v*' } | Select-Object -First 1
     $Version = $cli.tag_name -replace '^cli-v', ''
 }
 $url = "https://github.com/bitwarden/clients/releases/download/cli-v$Version/bw-windows-$Version.zip"
 Write-Host "Downloading $url"
 $zip = Join-Path $env:TEMP "bw-windows-$Version.zip"
-Invoke-WebRequest $url -OutFile $zip -Headers @{ 'User-Agent' = 'TenantLauncher-build' }
+Invoke-WithRetry 'Download' { Invoke-WebRequest $url -OutFile $zip -Headers $headers -TimeoutSec 300 }
 Expand-Archive $zip -DestinationPath bin -Force
 Remove-Item $zip
+if (-not (Test-Path bin\bw.exe)) { throw "bin\bw.exe not found after extracting $zip" }
 Write-Host "bin\bw.exe = Bitwarden CLI $Version" -ForegroundColor Green
