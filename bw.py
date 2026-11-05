@@ -4,7 +4,7 @@ Secrets never touch disk or the command line: the master password goes in via an
 environment variable (--passwordenv) and the session key is kept in memory /
 passed to child processes via BW_SESSION.
 
-bw.exe is looked for next to the app first (bin\\bw.exe, bundled by the installer),
+bw.exe is looked for next to the app first (bin/bw.exe, bundled by the installer),
 then on PATH.
 """
 import json
@@ -18,10 +18,17 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def _find_bw() -> str | None:
-    here = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-    for cand in (here / "bin" / "bw.exe", here / "bw.exe"):
-        if cand.exists():
-            return str(cand)
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+        if getattr(sys, "_MEIPASS", None):          # PyInstaller onedir puts bundled data in _internal
+            roots.append(Path(sys._MEIPASS))
+    else:
+        roots.append(Path(__file__).resolve().parent)
+    for root in roots:
+        for cand in (root / "bin" / "bw.exe", root / "bw.exe"):
+            if cand.exists():
+                return str(cand)
     return shutil.which("bw")
 
 
