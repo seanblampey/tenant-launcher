@@ -40,10 +40,21 @@ class BwError(Exception):
 
 
 class TwoStepRequired(BwError):
-    pass
+    """Bitwarden wants a code. multiple=True means the account has several two-step methods."""
+
+    def __init__(self, msg: str, multiple: bool = False):
+        super().__init__(msg)
+        self.multiple = multiple
 
 
-TWO_STEP_METHODS = {"Authenticator app": 0, "Email": 1, "YubiKey": 3}
+TWO_STEP_METHODS = {"Authenticator app": 0, "Email (code sent to you)": 1, "YubiKey": 3}
+
+# What `bw login --nointeraction` prints instead of prompting (apps/cli/src/auth/commands/login.command.ts):
+#   one two-step method, or new-device verification  -> "Code is required."
+#   several two-step methods                          -> "Login failed. No provider selected."
+_CODE_REQUIRED = "code is required"
+_NO_PROVIDER = "no provider selected"
+_BAD_METHOD = "invalid two-step login method"
 
 
 def _run(args: list[str], session: str | None = None, env: dict | None = None, timeout: int = 90) -> str:
@@ -72,7 +83,13 @@ def status() -> dict:
 
 
 def login(email: str, master_password: str, method: int | None = None, code: str | None = None) -> str:
-    """bw login -> session key. Raises TwoStepRequired when the account needs a 2FA code."""
+    """bw login -> session key.
+
+    First call with no code. Raises TwoStepRequired when Bitwarden wants a code (two-step login,
+    or the new-device email check on accounts without two-step). Call again with method+code;
+    if the CLI still wants a code after a valid two-step code, that is new-device verification,
+    which the CLI only accepts at its interactive prompt, so we answer that prompt over a pipe.
+    """
     args = ["login", email, "--passwordenv", "TL_BW_PASSWORD", "--raw"]
     if method is not None and code:
         args += ["--method", str(method), "--code", code]
@@ -81,13 +98,105 @@ def login(email: str, master_password: str, method: int | None = None, code: str
     except BwError as e:
         msg = str(e)
         low = msg.lower()
-        if "two-step" in low or "two step" in low or "2fa" in low or "twofactor" in low:
+        if _NO_PROVIDER in low:
+            raise TwoStepRequired(msg, multiple=True)
+        if _CODE_REQUIRED in low or (code and _BAD_METHOD in low):
+            if code:
+                # Two-step satisfied (or not configured) but a code is still wanted -> new-device email code.
+                return _login_interactive(email, master_password, method, code, device_code=code)
             raise TwoStepRequired(msg)
         if "already logged in" in low:
             raise BwError("Bitwarden CLI is already logged in as someone else. Use 'Sign out' first.")
-        if "incorrect" in low or "invalid" in low:
-            raise BwError("Bitwarden rejected that email / master password" + (" / code." if code else "."))
+        if "incorrect" in low or "invalid" in low or "not found" in low:
+            raise BwError("Bitwarden rejected that " + ("code." if code else "email / master password."))
         raise
+
+
+def send_email_code(email: str, master_password: str) -> None:
+    """Make Bitwarden email a two-step code (accounts with the Email method among several)."""
+    try:
+        _run(["login", email, "--passwordenv", "TL_BW_PASSWORD", "--raw", "--method", "1"],
+             env={"TL_BW_PASSWORD": master_password}, timeout=120)
+    except BwError as e:
+        low = str(e).lower()
+        if _CODE_REQUIRED in low:
+            return                      # email was sent, CLI then stopped for lack of a code: expected
+        if _BAD_METHOD in low:
+            raise BwError("This Bitwarden account doesn't have Email as a two-step method.")
+        raise
+
+
+def _strip_ansi(s: str) -> str:
+    import re
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", s).replace("\r", "")
+
+
+def _login_interactive(email: str, master_password: str, method: int | None, code: str | None,
+                       device_code: str, timeout: int = 150) -> str:
+    """Run `bw login` without --nointeraction and answer its prompts over stdin.
+    Used for new-device verification, which has no command-line flag."""
+    import threading
+    if not BW:
+        raise BwError("Bitwarden CLI (bw.exe) not found.")
+    cmd = [BW, "login", email, "--passwordenv", "TL_BW_PASSWORD", "--raw"]
+    if method is not None and code:
+        cmd += ["--method", str(method), "--code", code]
+    env = dict(os.environ)
+    env.pop("BW_SESSION", None); env.pop("BW_NOINTERACTION", None)
+    env["TL_BW_PASSWORD"] = master_password
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=env, creationflags=_NO_WINDOW)
+    err = bytearray()
+    answered: set[str] = set()
+
+    def answer(key: str, text: str):
+        if key in answered:
+            return
+        answered.add(key)
+        try:
+            p.stdin.write((text + "\n").encode("utf-8")); p.stdin.flush()
+        except Exception:
+            pass
+
+    def pump():
+        while True:
+            chunk = p.stderr.read(1)
+            if not chunk:
+                break
+            err.extend(chunk)
+            tail = err[-400:].decode("utf-8", "replace").lower()
+            if "verification required" in tail:
+                answer("device", device_code)
+            elif "two-step login code" in tail:
+                answer("code", code or device_code)
+            elif "two-step login method" in tail:
+                answer("method", "")             # Enter = first listed method
+            elif "master password" in tail:
+                answer("pw", master_password)    # should not happen with --passwordenv
+    t = threading.Thread(target=pump, daemon=True); t.start()
+    try:
+        out = p.stdout.read().decode("utf-8", "replace")
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        raise BwError("Bitwarden sign-in timed out waiting for the verification code.")
+    finally:
+        try:
+            p.stdin.close()
+        except Exception:
+            pass
+    t.join(timeout=5)
+    if p.returncode != 0:
+        lines = [ln.strip() for ln in _strip_ansi(err.decode("utf-8", "replace")).splitlines()
+                 if ln.strip() and not ln.strip().startswith("?") and "data file" not in ln]
+        msg = lines[-1] if lines else "Bitwarden sign-in failed."
+        if "master password" not in msg.lower() and ("invalid" in msg.lower() or "incorrect" in msg.lower()):
+            msg = "Bitwarden rejected that code."
+        raise BwError(msg)
+    session = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    if not session:
+        raise BwError("Bitwarden signed in but returned no session key.")
+    return session
 
 
 def logout() -> None:

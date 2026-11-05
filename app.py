@@ -48,7 +48,9 @@ class SignInDialog(tk.Toplevel):
         self.code = tk.StringVar()
         self.code_entry = ttk.Entry(self.code_frame, textvariable=self.code, width=12); self.code_entry.grid(row=0, column=1, sticky="w", pady=3)
         self.method = tk.StringVar(value="Authenticator app")
-        ttk.Combobox(self.code_frame, textvariable=self.method, values=list(bw.TWO_STEP_METHODS), state="readonly", width=16).grid(row=0, column=2, padx=(8, 0))
+        ttk.Combobox(self.code_frame, textvariable=self.method, values=list(bw.TWO_STEP_METHODS), state="readonly", width=22).grid(row=0, column=2, padx=(8, 0))
+        self.send_btn = ttk.Button(self.code_frame, text="Email me a code", command=self.send_email_code)
+        self.send_btn.grid(row=1, column=1, columnspan=2, sticky="w", pady=(2, 0))
         self.msg = ttk.Label(f, text="", foreground="#b00", wraplength=340, justify="left")
         self.msg.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
         btns = ttk.Frame(f); btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
@@ -75,25 +77,44 @@ class SignInDialog(tk.Toplevel):
         method = bw.TWO_STEP_METHODS[self.method.get()] if self.needs_code else None
         code = self.code.get().strip() if self.needs_code else None
 
+        if self.needs_code and not code:
+            self.ok.state(["!disabled"]); self.msg.config(text="Enter the code.", foreground="#b00"); return
+
         def work():
             try:
                 sess = bw.login(email, pw, method, code)
                 self.after(0, lambda: self._done(sess, email))
-            except bw.TwoStepRequired:
-                self.after(0, lambda: self._ask_code(method))
+            except bw.TwoStepRequired as e:
+                self.after(0, lambda: self._ask_code(e))
             except bw.BwError as e:
                 self.after(0, lambda: self._error(str(e)))
         threading.Thread(target=work, daemon=True).start()
 
-    def _ask_code(self, method):
+    def _ask_code(self, exc: "bw.TwoStepRequired"):
         self.ok.state(["!disabled"])
-        if method == 1:
-            self.show_code_row("A code has been emailed to you. Enter it and sign in again.")
-        elif self.needs_code and not self.code.get().strip():
-            self.msg.config(text="Enter the two-step code.", foreground="#b00")
+        if exc.multiple:
+            self.show_code_row("Bitwarden needs a code. Pick your two-step method and enter the code "
+                               "(for Email, press 'Email me a code' first).")
         else:
-            self.show_code_row("This account has two-step login. Enter the code from your authenticator "
-                               "(pick Email if you use emailed codes, then press Sign in to have one sent).")
+            self.show_code_row("Bitwarden needs a code: from your authenticator app, or the one it just "
+                               "emailed you if your account uses email codes / new-device verification.")
+
+    def send_email_code(self):
+        email = self.email.get().strip(); pw = self.password.get()
+        if not email or not pw:
+            self.msg.config(text="Email and master password are required.", foreground="#b00"); return
+        self.send_btn.state(["disabled"]); self.msg.config(text="Asking Bitwarden to email a code...", foreground="#333")
+        self.method.set("Email (code sent to you)")
+
+        def work():
+            try:
+                bw.send_email_code(email, pw)
+                self.after(0, lambda: self.msg.config(text="Code emailed. Enter it and press Sign in.", foreground="#333"))
+            except bw.BwError as e:
+                self.after(0, lambda: self.msg.config(text=str(e), foreground="#b00"))
+            finally:
+                self.after(0, lambda: self.send_btn.state(["!disabled"]))
+        threading.Thread(target=work, daemon=True).start()
 
     def _error(self, text: str):
         self.ok.state(["!disabled"]); self.msg.config(text=text, foreground="#b00")
