@@ -85,6 +85,29 @@ keeps it in `%LOCALAPPDATA%\TenantLauncher\customers.csv`. Both are `Name,Bitwar
 | `build.ps1`, `installer.iss`, `Get-BwCli.ps1` | Packaging. |
 | `Make-Shortcuts.ps1` | Optional per-customer desktop shortcuts. |
 
+## Security notes
+
+* **What is on disk:** Chrome profiles under `%LOCALAPPDATA%\TenantLauncher\profiles` hold the
+  signed-in session cookies for each tenant's global admin, exactly like staying signed in to a
+  browser would. Chrome encrypts them to your Windows account (DPAPI), but anyone who can act
+  as your Windows user (unlocked PC, malware running as you) could use them. Lock your PC,
+  use BitLocker, and delete a profile folder to forget that tenant's session.
+* **What is in memory:** while the launcher is open it holds the `O365 -` Bitwarden items
+  (username, password, TOTP secret) in RAM so launches are instant. Close it when you are done.
+  The browser worker gets one item over a private pipe; nothing is passed on the command line
+  or written to disk. The Bitwarden session key is in the worker's environment for its lifetime.
+* **Bitwarden CLI state:** `%APPDATA%\Bitwarden CLI\data.json` holds your encrypted vault after
+  sign-in, unreadable without the master password / session key. Use **Sign out** on a shared PC.
+* **MFA secrets next to passwords:** storing the admin accounts' TOTP in the same Bitwarden item
+  as the password means whoever has vault access has both factors. That is a property of the
+  vault layout, not this tool, but it is worth knowing.
+* **No remote debugging port:** Playwright talks to Chrome over a pipe; nothing is listening
+  on the network.
+* **Logs:** `profiles\Tenant-<Customer>.log` records usernames and sign-in steps, never passwords
+  or codes. `app.log` holds error tracebacks.
+* **Unsigned binaries:** the installer and exe are not code-signed, so SmartScreen may warn on
+  first run. Verify the download came from this repo's Releases page.
+
 ## Worth knowing
 
 * Sessions last as long as the tenant's sign-in frequency / token policy allows. Conditional

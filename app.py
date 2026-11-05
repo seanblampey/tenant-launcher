@@ -364,7 +364,14 @@ class App(tk.Tk):
         except Exception as e:
             self.ui(lambda m=_errmsg(e): self.set_status(f"Vault cache failed, launches will ask bw directly ({m})"))
             return
-        self.items = items
+        # Keep only what the launcher can use (customer items by prefix, plus anything already in the
+        # list) so the rest of the vault is never held in this process's memory.
+        prefix = (self.settings.get("item_prefix", DEFAULT_ITEM_PREFIX) or "").lower()
+        linked = {c.bitwarden_item for c in self.customers}
+        self.items = {k: it for k, it in items.items()
+                      if (prefix and (it.get("name") or "").lower().startswith(prefix))
+                      or k in linked or it.get("name") in linked}
+        del items
         self.ui(lambda: (self.set_status(done_msg), self.auto_add(quiet=True)))
 
     def cached_item(self, c: Customer) -> dict | None:

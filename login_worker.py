@@ -42,6 +42,15 @@ SEL_OTHER_TILE = '#otherTile'
 SEL_ERRORS = '#passwordError, #usernameError, #idSpan_SAOTCC_Error_OTC, #idTd_SAOTCS_Error, .alert-error'
 
 
+def _nap(page, seconds: float) -> None:
+    """Sleep without starving Playwright: its sync API only services the browser connection
+    (new tabs, popups, navigations) while a Playwright call is in progress."""
+    try:
+        page.wait_for_timeout(seconds * 1000)
+    except Exception:
+        time.sleep(seconds)
+
+
 def _vis(page, sel: str) -> bool:
     try:
         loc = page.locator(sel).filter(visible=True)
@@ -90,11 +99,11 @@ def _wait_step_change(page, sel: str, max_s: float = 8.0) -> None:
     while time.time() < end:
         try:
             if page.url != start_url or not _vis(page, sel) or _text(page, SEL_ERRORS):
-                time.sleep(0.25)
+                _nap(page, 0.25)
                 return
         except Exception:
             return
-        time.sleep(0.1)
+        _nap(page, 0.1)
 
 
 def auto_login(page, username: str, password: str, get_totp, log, timeout: int = 150) -> str:
@@ -116,7 +125,7 @@ def auto_login(page, username: str, password: str, get_totp, log, timeout: int =
             settled_since = settled_since or time.time()
             if time.time() - settled_since > 1.0:
                 return "ok" if seen_login else "already"
-            time.sleep(0.2)
+            _nap(page, 0.2)
             continue
         settled_since = None
         seen_login = True
@@ -129,9 +138,9 @@ def auto_login(page, username: str, password: str, get_totp, log, timeout: int =
             # Account picker ("Pick an account")
             tile = page.locator(f'[data-test-id="{username}"]')
             if tile.count() and tile.first.is_visible(timeout=250):
-                log("picking account tile"); tile.first.click(); time.sleep(1); continue
+                log("picking account tile"); tile.first.click(); _nap(page, 1); continue
             if _vis(page, SEL_OTHER_TILE):
-                log("clicking 'Use another account'"); _click(page, SEL_OTHER_TILE); time.sleep(1); continue
+                log("clicking 'Use another account'"); _click(page, SEL_OTHER_TILE); _nap(page, 1); continue
 
             # Authenticator push / number-match prompt -> switch to verification code
             if _vis(page, SEL_APPROVE_PROMPT):
@@ -140,14 +149,14 @@ def auto_login(page, username: str, password: str, get_totp, log, timeout: int =
                 tries["other"] += 1
                 log("push prompt shown - asking for another method")
                 if _click(page, SEL_OTHER_WAY):
-                    time.sleep(1.2)
+                    _nap(page, 1.2)
                     if _vis(page, SEL_TOTP_OPTION):
-                        _click(page, SEL_TOTP_OPTION); time.sleep(1.2)
+                        _click(page, SEL_TOTP_OPTION); _nap(page, 1.2)
                 else:
                     return "manual"
                 continue
             if _vis(page, SEL_TOTP_OPTION) and not _vis(page, SEL_OTC):
-                log("choosing verification code"); _click(page, SEL_TOTP_OPTION); time.sleep(1.2); continue
+                log("choosing verification code"); _click(page, SEL_TOTP_OPTION); _nap(page, 1.2); continue
 
             # Stay signed in?
             if _vis(page, SEL_KMSI):
@@ -200,7 +209,7 @@ def auto_login(page, username: str, password: str, get_totp, log, timeout: int =
             if "TargetClosed" in type(e).__name__ or page.is_closed():
                 return "closed"
             log(f"(retry: {type(e).__name__})")
-        time.sleep(0.3)
+        _nap(page, 0.3)
     return "manual"
 
 
@@ -329,9 +338,15 @@ def main() -> int:
         password = None
 
         # Keep the profile open until the user closes the browser window.
+        # wait_for_event keeps Playwright's loop running, so tabs the page opens (Exchange,
+        # Entra, ... from the admin centre's side menu) are created and load normally.
         try:
             while ctx.pages:
-                time.sleep(1)
+                try:
+                    ctx.wait_for_event("close", timeout=0)
+                    break
+                except Exception:
+                    page.wait_for_timeout(500) if not page.is_closed() else time.sleep(0.5)
         except Exception:
             pass
         try:
