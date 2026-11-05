@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 FROZEN = bool(getattr(sys, "frozen", False))
 
 # Source checkout: files live next to the scripts. Installed exe: exe folder (read-only) + per-user data dir.

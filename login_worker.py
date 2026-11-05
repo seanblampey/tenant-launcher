@@ -24,6 +24,10 @@ from common import PORTALS, PROFILES_DIR, browser_channel, find_customer
 
 MS_LOGIN_HOSTS = re.compile(r"https://(login\.microsoftonline\.com|login\.microsoft\.com|login\.live\.com|"
                             r"login\.windows\.net|login\.microsoftonline\.us|device\.login\.microsoftonline\.com)", re.I)
+# Pages Microsoft can send an account to after a successful password: "More information required",
+# MFA registration, password reset, terms of use. Not the portal, so the user has to deal with them.
+MS_INTERRUPT_HOSTS = re.compile(r"https://(account\.activedirectory\.windowsazure\.com|mysignins\.microsoft\.com|"
+                                r"aka\.ms|passwordreset\.microsoftonline\.com|account\.microsoft\.com)", re.I)
 
 # Selectors for the Microsoft sign-in flow. Classic ids first, newer "lightbox" fallbacks second.
 # Microsoft keeps the inactive step's input in the DOM with aria-hidden="true", tabindex="-1" and opacity 0,
@@ -124,6 +128,8 @@ def auto_login(page, username: str, password: str, get_totp, log, timeout: int =
             # Off the login host - give the portal 2s to be sure it is not bouncing back.
             settled_since = settled_since or time.time()
             if time.time() - settled_since > 1.0:
+                if MS_INTERRUPT_HOSTS.match(url):
+                    return "interrupt"
                 return "ok" if seen_login else "already"
             _nap(page, 0.2)
             continue
@@ -332,8 +338,15 @@ def main() -> int:
 
         log(f"signing in as {username}")
         result = auto_login(page, username, password, get_totp, log)
-        log(f"result: {result}")
-        if result not in ("ok", "already", "manual", "closed"):
+        try:
+            final_url, final_title = page.url, (page.title() or "")
+        except Exception:
+            final_url, final_title = "?", "?"
+        log(f"result: {result}  url={final_url[:160]}  title={final_title[:80]!r}")
+        if result == "interrupt":
+            log("Microsoft wants something from this account before the portal (MFA setup, "
+                "password change, terms of use...). Finish it in the browser; the session is kept.")
+        if result not in ("ok", "already", "manual", "closed", "interrupt"):
             messagebox.showwarning("Tenant Launcher", f"{cust.name}: {result}\n\nFinish signing in manually.", parent=root)
         password = None
 
