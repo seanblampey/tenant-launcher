@@ -33,6 +33,22 @@ session the same way a normal browser would, and the customer list (names + Bitw
   sync). Change the prefix box if your naming is different.
 * **Sign out** logs the bundled CLI out of Bitwarden so another team member can sign in.
 
+## Updates
+
+The app checks GitHub Releases on startup (and via **Check for updates**). When a newer version
+exists an **Update to x.y.z** button appears; it downloads the installer, runs it silently and
+reopens the app. Installing any version over another also works by hand; your customer list,
+settings, Bitwarden sign-in and browser sessions are kept.
+
+The check needs to read this repo's releases. While the repo is **private** that requires a
+read-only GitHub token on each PC: put it in `%LOCALAPPDATA%\TenantLauncher\settings.json` as
+`"github_token": "github_pat_..."` (fine-grained token, Contents: read-only, this repo only).
+Making the repo public removes that step.
+
+## Look and feel
+
+Light and dark themes (button in the header, remembered per user).
+
 ## What the sign-in automation does
 
 It watches the Microsoft sign-in page and fills whatever step appears:

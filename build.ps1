@@ -33,6 +33,7 @@ if (Test-Path dist)  { Remove-Item dist  -Recurse -Force }
 Invoke-Native 'PyInstaller' {
     python -m PyInstaller --noconfirm --clean --windowed --name TenantLauncher `
         --collect-all playwright `
+        --collect-all ttkbootstrap `
         --hidden-import pyotp `
         --add-data "customers.example.csv;." `
         --add-data "assets\icon.ico;assets" `

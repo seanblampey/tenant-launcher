@@ -15,3 +15,6 @@ __pycache__/
 
 # legacy launcher kept locally only
 Launch-Tenant.ps1
+
+# UI screenshots taken during testing show customer names
+assets/ui-*.png

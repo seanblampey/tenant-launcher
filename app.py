@@ -12,9 +12,12 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox
+
+import ttkbootstrap as tb
 
 import bw
+import updater
 from common import (APP_VERSION, CSV_PATH, DATA_DIR, DEFAULT_ITEM_PREFIX, FROZEN, PORTALS, ROOT, Customer,
                     load_customers, load_settings, resource_path, save_customers, save_settings)
 
@@ -24,6 +27,7 @@ if not PYTHONW.exists():
 WORKER = ROOT / "login_worker.py"
 LOG_PATH = DATA_DIR / "app.log"
 APP_USER_MODEL_ID = "XenexSystems.TenantLauncher"
+THEMES = {"light": "bootstrap-light", "dark": "bootstrap-dark"}
 
 
 def log_exception(where: str, exc: BaseException) -> None:
@@ -40,14 +44,14 @@ def log_exception(where: str, exc: BaseException) -> None:
 
 def _errmsg(exc: BaseException) -> str:
     """Text for the user. Non-Bitwarden errors also get logged with their traceback."""
-    if isinstance(exc, bw.BwError):
+    if isinstance(exc, (bw.BwError, updater.UpdateError)):
         return str(exc)
     log_exception("background task", exc)
     return f"{type(exc).__name__}: {exc}  (details in {LOG_PATH})"
 
 
 def _install_crash_logging() -> None:
-    sys.excepthook = lambda t, v, tb: log_exception("unhandled", v)
+    sys.excepthook = lambda t, v, tb_: log_exception("unhandled", v)
     threading.excepthook = lambda args: log_exception(f"thread {args.thread.name}", args.exc_value)
 
 
@@ -89,39 +93,64 @@ def _set_app_user_model_id() -> None:
         pass
 
 
-class SignInDialog(tk.Toplevel):
+def _apply_icon(win) -> None:
+    try:
+        win.iconbitmap(default=str(resource_path("assets/icon.ico")))
+        win._icon_img = tk.PhotoImage(file=str(resource_path("assets/icon-256.png")))
+        win.iconphoto(True, win._icon_img)
+    except Exception as e:
+        log_exception("window icon", e)
+
+
+class SignInDialog(tb.Toplevel):
     """Bitwarden sign-in: email + master password (+ two-step code when the account needs one)."""
 
-    def __init__(self, parent, email: str = "", email_locked: bool = False):
+    def __init__(self, parent, email: str = "", email_locked: bool = False, unlock_only: bool = False):
         super().__init__(parent)
-        self.title("Sign in to Bitwarden"); self.resizable(False, False); self.transient(parent); self.grab_set()
+        self.title("Unlock Bitwarden" if unlock_only else "Sign in to Bitwarden")
+        self.resizable(False, False); self.transient(parent); self.grab_set()
+        _apply_icon(self)
         self.result: str | None = None          # session key
         self.email_used: str = ""
         self.needs_code = False
-        f = ttk.Frame(self, padding=14); f.pack(fill="both", expand=True)
-        ttk.Label(f, text="Use your own Bitwarden account (the one with access to the customer logins).").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        ttk.Label(f, text="Email:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.unlock_only = unlock_only
+
+        f = tb.Frame(self, padding=(22, 18, 22, 18)); f.pack(fill="both", expand=True)
+        tb.Label(f, text="Unlock your vault" if unlock_only else "Sign in with your Bitwarden account",
+                 font=("Segoe UI", 13, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        tb.Label(f, text="The customer logins are read from your own vault. Nothing is stored by this app.",
+                 bootstyle="secondary", wraplength=380).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 12))
+
+        tb.Label(f, text="Email").grid(row=2, column=0, sticky="e", padx=(0, 10), pady=4)
         self.email = tk.StringVar(value=email)
-        self.email_entry = ttk.Entry(f, textvariable=self.email, width=38); self.email_entry.grid(row=1, column=1, sticky="ew", pady=3)
+        self.email_entry = tb.Entry(f, textvariable=self.email, width=36)
+        self.email_entry.grid(row=2, column=1, sticky="ew", pady=4)
         if email_locked:
             self.email_entry.state(["disabled"])
-        ttk.Label(f, text="Master password:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=3)
+        tb.Label(f, text="Master password").grid(row=3, column=0, sticky="e", padx=(0, 10), pady=4)
         self.password = tk.StringVar()
-        self.pw_entry = ttk.Entry(f, textvariable=self.password, show="*", width=38); self.pw_entry.grid(row=2, column=1, sticky="ew", pady=3)
+        self.pw_entry = tb.Entry(f, textvariable=self.password, show="•", width=36)
+        self.pw_entry.grid(row=3, column=1, sticky="ew", pady=4)
+
         # two-step row (hidden until needed)
-        self.code_frame = ttk.Frame(f)
-        ttk.Label(self.code_frame, text="Two-step code:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.code_frame = tb.Frame(f)
+        tb.Label(self.code_frame, text="Two-step code").grid(row=0, column=0, sticky="e", padx=(0, 10), pady=4)
         self.code = tk.StringVar()
-        self.code_entry = ttk.Entry(self.code_frame, textvariable=self.code, width=12); self.code_entry.grid(row=0, column=1, sticky="w", pady=3)
+        self.code_entry = tb.Entry(self.code_frame, textvariable=self.code, width=10)
+        self.code_entry.grid(row=0, column=1, sticky="w", pady=4)
         self.method = tk.StringVar(value="Authenticator app")
-        ttk.Combobox(self.code_frame, textvariable=self.method, values=list(bw.TWO_STEP_METHODS), state="readonly", width=22).grid(row=0, column=2, padx=(8, 0))
-        self.send_btn = ttk.Button(self.code_frame, text="Email me a code", command=self.send_email_code)
-        self.send_btn.grid(row=1, column=1, columnspan=2, sticky="w", pady=(2, 0))
-        self.msg = ttk.Label(f, text="", foreground="#b00", wraplength=340, justify="left")
-        self.msg.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        btns = ttk.Frame(f); btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
-        self.ok = ttk.Button(btns, text="Sign in", command=lambda: self.submit()); self.ok.pack(side="right")
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=6)
+        tb.Combobox(self.code_frame, textvariable=self.method, values=list(bw.TWO_STEP_METHODS),
+                    state="readonly", width=22).grid(row=0, column=2, padx=(8, 0))
+        self.send_btn = tb.Button(self.code_frame, text="Email me a code", bootstyle="link", command=self.send_email_code)
+        self.send_btn.grid(row=1, column=1, columnspan=2, sticky="w")
+
+        self.msg = tb.Label(f, text="", bootstyle="danger", wraplength=380, justify="left")
+        self.msg.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        btns = tb.Frame(f); btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        self.ok = tb.Button(btns, text="Unlock" if unlock_only else "Sign in", bootstyle="primary", width=10,
+                            command=lambda: self.submit())
+        self.ok.pack(side="right")
+        tb.Button(btns, text="Cancel", bootstyle="secondary-outline", width=9, command=self.destroy).pack(side="right", padx=8)
         self.bind("<Return>", lambda _e: self.submit())
         self.ui = UiQueue(self)
         (self.pw_entry if email else self.email_entry).focus_set()
@@ -130,26 +159,28 @@ class SignInDialog(tk.Toplevel):
         y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 3
         self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
+    def _say(self, text: str, style: str = "secondary"):
+        self.msg.config(text=text, bootstyle=style)
+
     def show_code_row(self, text: str):
         self.needs_code = True
-        self.code_frame.grid(row=3, column=0, columnspan=2, sticky="w")
-        self.msg.config(text=text, foreground="#333")
+        self.code_frame.grid(row=4, column=0, columnspan=2, sticky="w")
+        self._say(text)
         self.code_entry.focus_set()
 
     def submit(self):
         email = self.email.get().strip(); pw = self.password.get()
         if not email or not pw:
-            self.msg.config(text="Email and master password are required.", foreground="#b00"); return
-        self.ok.state(["disabled"]); self.msg.config(text="Signing in...", foreground="#333"); self.update_idletasks()
+            self._say("Email and master password are required.", "danger"); return
         method = bw.TWO_STEP_METHODS[self.method.get()] if self.needs_code else None
         code = self.code.get().strip() if self.needs_code else None
-
         if self.needs_code and not code:
-            self.ok.state(["!disabled"]); self.msg.config(text="Enter the code.", foreground="#b00"); return
+            self._say("Enter the code.", "danger"); return
+        self.ok.state(["disabled"]); self._say("Unlocking..." if self.unlock_only else "Signing in..."); self.update_idletasks()
 
         def work():
             try:
-                sess = bw.login(email, pw, method, code)
+                sess = bw.unlock(pw) if self.unlock_only else bw.login(email, pw, method, code)
                 self.ui(lambda: self._done(sess, email))
             except bw.TwoStepRequired as e:
                 self.ui(lambda e=e: self._ask_code(e))
@@ -169,101 +200,135 @@ class SignInDialog(tk.Toplevel):
     def send_email_code(self):
         email = self.email.get().strip(); pw = self.password.get()
         if not email or not pw:
-            self.msg.config(text="Email and master password are required.", foreground="#b00"); return
-        self.send_btn.state(["disabled"]); self.msg.config(text="Asking Bitwarden to email a code...", foreground="#333")
+            self._say("Email and master password are required.", "danger"); return
+        self.send_btn.state(["disabled"]); self._say("Asking Bitwarden to email a code...")
         self.method.set("Email (code sent to you)")
 
         def work():
             try:
                 bw.send_email_code(email, pw)
-                self.ui(lambda: self.msg.config(text="Code emailed. Enter it and press Sign in.", foreground="#333"))
+                self.ui(lambda: self._say("Code emailed. Enter it and press Sign in."))
             except Exception as e:
-                self.ui(lambda m=_errmsg(e): self.msg.config(text=m, foreground="#b00"))
+                self.ui(lambda m=_errmsg(e): self._say(m, "danger"))
             finally:
                 self.ui(lambda: self.send_btn.state(["!disabled"]))
         threading.Thread(target=work, daemon=True).start()
 
     def _error(self, text: str):
-        self.ok.state(["!disabled"]); self.msg.config(text=text, foreground="#b00")
+        self.ok.state(["!disabled"]); self._say(text, "danger")
 
     def _done(self, session: str, email: str):
         self.result = session; self.email_used = email
         self.password.set(""); self.destroy()
 
 
-class App(tk.Tk):
+class App(tb.Window):
     def __init__(self):
         _install_crash_logging()
         _set_app_user_model_id()          # must happen before the first window exists
-        super().__init__()
-        self.report_callback_exception = lambda t, v, tb: log_exception("tk callback", v)
+        self.settings = load_settings()
+        super().__init__(themename=THEMES.get(self.settings.get("theme", "light"), THEMES["light"]))
+        self.report_callback_exception = lambda t, v, tb_: log_exception("tk callback", v)
         self.title(f"Tenant Launcher {APP_VERSION}")
-        try:
-            self.iconbitmap(default=str(resource_path("assets/icon.ico")))
-            self._icon_img = tk.PhotoImage(file=str(resource_path("assets/icon-256.png")))
-            self.iconphoto(True, self._icon_img)   # big + small window icons (what the taskbar shows)
-        except Exception as e:
-            log_exception("window icon", e)
-        self.geometry("600x560")
-        self.minsize(480, 400)
+        _apply_icon(self)
+        self.geometry("760x720"); self.minsize(600, 520)
         self.session: str | None = None
         self.user_email: str = ""
-        self.items: dict[str, dict] = {}      # vault Login items by id, cached after sign-in
+        self.items: dict[str, dict] = {}      # customer Login items by id, cached after sign-in
         self.customers: list[Customer] = []
-        self.settings = load_settings()
+        self.update_info: "updater.Update | None" = None
         self._build()
         self.ui = UiQueue(self)
         self.reload()
         self.after(150, self.ensure_unlocked)
+        threading.Thread(target=self._bg_update_check, daemon=True).start()
 
     # ---------- UI ----------
     def _build(self):
-        top = ttk.Frame(self, padding=(10, 10, 10, 4)); top.pack(fill="x")
+        self.style.configure("Treeview", rowheight=30, font=("Segoe UI", 10))
+        self.style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+
+        # header
+        hdr = tb.Frame(self, padding=(18, 14, 18, 8)); hdr.pack(fill="x")
+        try:
+            self._logo = tk.PhotoImage(file=str(resource_path("assets/icon-256.png"))).subsample(6, 6)
+            tb.Label(hdr, image=self._logo).pack(side="left", padx=(0, 12))
+        except Exception:
+            pass
+        titles = tb.Frame(hdr); titles.pack(side="left")
+        tb.Label(titles, text="Tenant Launcher", font=("Segoe UI", 16, "bold")).pack(anchor="w")
+        self.bw_label = tb.Label(titles, text="Not signed in to Bitwarden", bootstyle="secondary")
+        self.bw_label.pack(anchor="w")
+        right = tb.Frame(hdr); right.pack(side="right")
+        self.update_btn = tb.Button(right, text="Update available", bootstyle="success", command=self.do_update)
+        self.theme_btn = tb.Button(right, text="☾  Dark" if self.settings.get("theme", "light") == "light" else "☀  Light",
+                                   bootstyle="secondary-outline", command=self.toggle_theme)
+        self.theme_btn.pack(side="right", padx=(8, 0))
+        tb.Button(right, text="Sign out", bootstyle="secondary-outline", command=self.sign_out).pack(side="right")
+
+        # search
+        srow = tb.Frame(self, padding=(18, 4, 18, 6)); srow.pack(fill="x")
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self.refresh_list())
-        ttk.Label(top, text="Search:").pack(side="left")
-        e = ttk.Entry(top, textvariable=self.search_var); e.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        tb.Label(srow, text="\U0001F50D").pack(side="left", padx=(0, 6))
+        e = tb.Entry(srow, textvariable=self.search_var, font=("Segoe UI", 11)); e.pack(side="left", fill="x", expand=True)
         e.focus_set()
-        self.bw_label = ttk.Label(top, text="Bitwarden: signed out", foreground="#b00")
-        self.bw_label.pack(side="right")
+        tb.Label(srow, text="  double-click a customer to open the M365 admin centre", bootstyle="secondary").pack(side="left")
 
-        mid = ttk.Frame(self, padding=(10, 0)); mid.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(mid, columns=("item", "notes"), show="headings", selectmode="browse")
+        # bottom bands are packed first (side=bottom) so the list gets the leftover space
+        sbar = tb.Frame(self, padding=(18, 4, 18, 8)); sbar.pack(side="bottom", fill="x")
+        bottom = tb.Frame(self, padding=(18, 2, 18, 4)); bottom.pack(side="bottom", fill="x")
+        tools = tb.Frame(self, padding=(18, 4, 18, 4)); tools.pack(side="bottom", fill="x")
+        portals = tb.Labelframe(self, text="Open in", padding=(10, 6)); portals.pack(side="bottom", fill="x", padx=18, pady=(10, 4))
+
+        # list
+        mid = tb.Frame(self, padding=(18, 0, 18, 0)); mid.pack(fill="both", expand=True)
+        self.tree = tb.Treeview(mid, columns=("item", "notes"), show="headings", selectmode="browse", bootstyle="primary")
         self.tree.heading("item", text="Customer"); self.tree.heading("notes", text="Notes")
-        self.tree.column("item", width=280); self.tree.column("notes", width=240)
-        sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
+        self.tree.column("item", width=320); self.tree.column("notes", width=260)
+        sb = tb.Scrollbar(mid, orient="vertical", command=self.tree.yview, bootstyle="round")
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", lambda _e: self.launch("admin"))
         self.tree.bind("<Return>", lambda _e: self.launch("admin"))
 
-        portals = ttk.LabelFrame(self, text="Open in", padding=6); portals.pack(fill="x", padx=10, pady=(6, 2))
+        # portals
         for i, (key, (label, _url)) in enumerate(PORTALS.items()):
-            b = ttk.Button(portals, text=label, command=lambda k=key: self.launch(k))
-            b.grid(row=i // 4, column=i % 4, sticky="ew", padx=2, pady=2)
+            style = "primary" if key == "admin" else "primary-outline"
+            tb.Button(portals, text=label, bootstyle=style, command=lambda k=key: self.launch(k)) \
+                .grid(row=i // 4, column=i % 4, sticky="ew", padx=3, pady=3)
         for c in range(4):
             portals.columnconfigure(c, weight=1)
 
-        auto = ttk.Frame(self, padding=(10, 4, 10, 0)); auto.pack(fill="x")
-        ttk.Label(auto, text="Auto-add Bitwarden items starting with:").pack(side="left")
+        # auto-add + tools
+        tb.Label(tools, text="Auto-add vault items starting with").pack(side="left")
         self.prefix_var = tk.StringVar(value=self.settings.get("item_prefix", DEFAULT_ITEM_PREFIX))
-        pe = ttk.Entry(auto, textvariable=self.prefix_var, width=14); pe.pack(side="left", padx=4)
+        pe = tb.Entry(tools, textvariable=self.prefix_var, width=12); pe.pack(side="left", padx=6)
         pe.bind("<Return>", lambda _e: self.auto_add())
-        ttk.Button(auto, text="Scan now", command=self.auto_add).pack(side="left")
+        tb.Button(tools, text="Scan now", bootstyle="info-outline", command=self.auto_add).pack(side="left")
+        tb.Button(tools, text="Check for updates", bootstyle="secondary-link", command=lambda: self.check_updates(manual=True)).pack(side="right")
+        tb.Button(tools, text="Sync vault", bootstyle="secondary-link", command=self.sync_vault).pack(side="right")
 
-        bottom = ttk.Frame(self, padding=(10, 4, 10, 10)); bottom.pack(fill="x")
-        ttk.Button(bottom, text="Add from Bitwarden", command=self.add_from_bitwarden).pack(side="left")
-        ttk.Button(bottom, text="Remove", command=self.remove_selected).pack(side="left", padx=4)
-        ttk.Button(bottom, text="Edit CSV", command=self.edit_csv).pack(side="left")
-        ttk.Button(bottom, text="Reload", command=self.reload).pack(side="left", padx=4)
-        ttk.Button(bottom, text="Sign out", command=self.sign_out).pack(side="right")
-        ttk.Button(bottom, text="Sync vault", command=self.sync_vault).pack(side="right", padx=4)
+        tb.Button(bottom, text="Add from Bitwarden", bootstyle="secondary-outline", command=self.add_from_bitwarden).pack(side="left")
+        tb.Button(bottom, text="Remove", bootstyle="danger-outline", command=self.remove_selected).pack(side="left", padx=6)
+        tb.Button(bottom, text="Edit list", bootstyle="secondary-outline", command=self.edit_csv).pack(side="left")
+        tb.Button(bottom, text="Reload", bootstyle="secondary-outline", command=self.reload).pack(side="left", padx=6)
 
-        self.status = tk.StringVar(value="Double-click a customer (or select + pick a portal).")
-        ttk.Label(self, textvariable=self.status, anchor="w", padding=(10, 0, 10, 6)).pack(fill="x")
+        # status bar
+        self.status = tk.StringVar(value="Select a customer, then double-click or pick a portal.")
+        tb.Label(sbar, textvariable=self.status, bootstyle="secondary", anchor="w").pack(side="left", fill="x", expand=True)
+        self.progress = tb.Progressbar(sbar, bootstyle="success-striped", length=160, mode="determinate")
 
     def set_status(self, text: str):
         self.status.set(text); self.update_idletasks()
+
+    def toggle_theme(self):
+        cur = self.settings.get("theme", "light")
+        new = "dark" if cur == "light" else "light"
+        self.style.theme_use(THEMES[new])
+        self.settings["theme"] = new; save_settings(self.settings)
+        self.theme_btn.config(text="☾  Dark" if new == "light" else "☀  Light")
+        self.style.configure("Treeview", rowheight=30, font=("Segoe UI", 10))
 
     # ---------- data ----------
     def reload(self):
@@ -280,7 +345,7 @@ class App(tk.Tk):
                 continue
             tag = "" if c.bitwarden_item else "noitem"
             self.tree.insert("", "end", iid=c.name, values=(c.name, c.notes or ("(no Bitwarden item)" if not c.bitwarden_item else "")), tags=(tag,))
-        self.tree.tag_configure("noitem", foreground="#888")
+        self.tree.tag_configure("noitem", foreground="#999")
         kids = self.tree.get_children()
         if kids:
             self.tree.selection_set(kids[0]); self.tree.focus(kids[0])
@@ -306,51 +371,29 @@ class App(tk.Tk):
             messagebox.showerror("Bitwarden", str(e), parent=self); return False
         if st.get("status") == "unauthenticated":
             dlg = SignInDialog(self, email=self.settings.get("bw_email", ""))
-            self.wait_window(dlg)
-            if not dlg.result:
-                return False
-            self.session = dlg.result; self.user_email = dlg.email_used
         else:
             # Already logged in (vault locked) - just need the master password for this account.
-            self.user_email = st.get("userEmail") or self.settings.get("bw_email", "")
-            dlg = SignInDialog(self, email=self.user_email, email_locked=True)
-            dlg.title("Unlock Bitwarden")
-            dlg.ok.config(text="Unlock")
-            dlg.submit = lambda: self._unlock_via(dlg)
-            self.wait_window(dlg)
-            if not dlg.result:
-                return False
-            self.session = dlg.result
+            dlg = SignInDialog(self, email=st.get("userEmail") or self.settings.get("bw_email", ""),
+                               email_locked=True, unlock_only=True)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return False
+        self.session = dlg.result; self.user_email = dlg.email_used
         self.settings["bw_email"] = self.user_email; save_settings(self.settings)
-        self.bw_label.config(text=f"Bitwarden: {self.user_email}", foreground="#070")
+        self.bw_label.config(text=f"Signed in as {self.user_email}", bootstyle="success")
         threading.Thread(target=self._bg_load, daemon=True).start()
         return True
-
-    def _unlock_via(self, dlg: SignInDialog):
-        pw = dlg.password.get()
-        if not pw:
-            dlg.msg.config(text="Master password is required.", foreground="#b00"); return
-        dlg.ok.state(["disabled"]); dlg.msg.config(text="Unlocking...", foreground="#333"); dlg.update_idletasks()
-        email = dlg.email.get().strip()
-
-        def work():
-            try:
-                sess = bw.unlock(pw)
-                dlg.ui(lambda: dlg._done(sess, email))
-            except Exception as e:
-                dlg.ui(lambda m=_errmsg(e): dlg._error(m))
-        threading.Thread(target=work, daemon=True).start()
 
     def sign_out(self):
         if not messagebox.askyesno("Sign out", "Sign out of Bitwarden on this PC?\n(Use this to switch to another team member's account.)", parent=self):
             return
         bw.logout()
         self.session = None; self.items = {}; self.user_email = ""
-        self.bw_label.config(text="Bitwarden: signed out", foreground="#b00")
+        self.bw_label.config(text="Not signed in to Bitwarden", bootstyle="secondary")
         self.after(100, self.ensure_unlocked)
 
     def _bg_load(self):
-        """Cache the vault once (so launches need no bw calls), auto-add customers, then sync and re-cache."""
+        """Cache the customer items once (so launches need no bw calls), auto-add, then sync and re-cache."""
         self._load_items("Vault cached - launches are instant.")
         try:
             bw.sync(self.session)
@@ -437,13 +480,14 @@ class App(tk.Tk):
     def add_from_bitwarden(self):
         if not self.ensure_unlocked():
             return
-        dlg = tk.Toplevel(self); dlg.title("Add from Bitwarden"); dlg.geometry("620x440"); dlg.transient(self); dlg.grab_set()
-        f = ttk.Frame(dlg, padding=10); f.pack(fill="both", expand=True)
-        ttk.Label(f, text="Search vault (name / username / URL):").pack(anchor="w")
+        dlg = tb.Toplevel(self); dlg.title("Add from Bitwarden"); dlg.geometry("640x460"); dlg.transient(self); dlg.grab_set()
+        _apply_icon(dlg)
+        f = tb.Frame(dlg, padding=14); f.pack(fill="both", expand=True)
+        tb.Label(f, text="Search vault (name / username / URL)").pack(anchor="w")
         qv = tk.StringVar(value=self.prefix_var.get() or "microsoft")
-        row = ttk.Frame(f); row.pack(fill="x", pady=(2, 6))
-        qe = ttk.Entry(row, textvariable=qv); qe.pack(side="left", fill="x", expand=True)
-        lst = ttk.Treeview(f, columns=("name", "user"), show="headings", selectmode="extended")
+        row = tb.Frame(f); row.pack(fill="x", pady=(4, 8))
+        qe = tb.Entry(row, textvariable=qv); qe.pack(side="left", fill="x", expand=True)
+        lst = tb.Treeview(f, columns=("name", "user"), show="headings", selectmode="extended", bootstyle="primary")
         lst.heading("name", text="Item"); lst.heading("user", text="Username")
         lst.column("name", width=320); lst.column("user", width=260)
         lst.pack(fill="both", expand=True)
@@ -452,31 +496,28 @@ class App(tk.Tk):
         def do_search(*_):
             lst.delete(*lst.get_children()); items.clear()
             q = qv.get().strip().lower()
-            source = list(self.items.values())
-            if not source:
-                try:
-                    source = [it for it in bw.search_items(q, self.session) if it.get("login")]
-                except bw.BwError as e:
-                    messagebox.showerror("Bitwarden", str(e), parent=dlg); return
+            try:
+                source = [it for it in bw.search_items(q, self.session) if it.get("login")]
+            except bw.BwError as e:
+                messagebox.showerror("Bitwarden", str(e), parent=dlg); return
             for it in sorted(source, key=lambda i: (i.get("name") or "").lower()):
-                hay = " ".join([it.get("name") or "", (it.get("login") or {}).get("username") or "",
-                                " ".join(u.get("uri") or "" for u in (it.get("login") or {}).get("uris") or [])]).lower()
-                if q and q not in hay:
-                    continue
                 items[it["id"]] = it
                 lst.insert("", "end", iid=it["id"], values=(it.get("name"), (it.get("login") or {}).get("username") or ""))
-        ttk.Button(row, text="Search", command=do_search).pack(side="left", padx=(4, 0))
-        ttk.Button(row, text="Select all", command=lambda: lst.selection_set(lst.get_children())).pack(side="left", padx=(4, 0))
+        tb.Button(row, text="Search", bootstyle="primary", command=do_search).pack(side="left", padx=(6, 0))
+        tb.Button(row, text="Select all", bootstyle="secondary-outline", command=lambda: lst.selection_set(lst.get_children())).pack(side="left", padx=(6, 0))
         qe.bind("<Return>", do_search)
 
         def add_selected():
-            added = self._add_items([items[i] for i in lst.selection()])
+            chosen = [items[i] for i in lst.selection()]
+            added = self._add_items(chosen)
+            for it in chosen:                      # make them launchable without a re-sync
+                self.items[it["id"]] = it
             self.set_status(f"Added {added} customer(s).")
             dlg.destroy()
-        btns = ttk.Frame(f); btns.pack(fill="x", pady=(8, 0))
-        ttk.Button(btns, text="Add selected", command=add_selected).pack(side="right")
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=4)
-        ttk.Label(f, text="Linked by item ID, so renaming the item in Bitwarden later is fine.", foreground="#666").pack(anchor="w", pady=(6, 0))
+        btns = tb.Frame(f); btns.pack(fill="x", pady=(10, 0))
+        tb.Button(btns, text="Add selected", bootstyle="primary", command=add_selected).pack(side="right")
+        tb.Button(btns, text="Cancel", bootstyle="secondary-outline", command=dlg.destroy).pack(side="right", padx=8)
+        tb.Label(f, text="Linked by item ID, so renaming the item in Bitwarden later is fine.", bootstyle="secondary").pack(anchor="w", pady=(8, 0))
         dlg.after(100, do_search)
 
     # ---------- launch ----------
@@ -506,6 +547,65 @@ class App(tk.Tk):
         finally:
             proc.stdin.close()
         self.set_status(f"Opening {PORTALS[portal][0]} for {c.name}...")
+
+    # ---------- updates ----------
+    def _bg_update_check(self):
+        try:
+            upd = updater.check()
+        except Exception:
+            return                                    # quiet on startup; 'Check for updates' reports errors
+        if upd:
+            self.ui(lambda: self._show_update(upd))
+
+    def _show_update(self, upd: "updater.Update"):
+        self.update_info = upd
+        self.update_btn.config(text=f"Update to {upd.version}")
+        self.update_btn.pack(side="right", padx=(8, 0))
+        self.set_status(f"Version {upd.version} is available.")
+
+    def check_updates(self, manual: bool = False):
+        self.set_status("Checking for updates...")
+        def run():
+            try:
+                upd = updater.check()
+            except Exception as e:
+                self.ui(lambda m=_errmsg(e): self.set_status(m)); return
+            if upd:
+                self.ui(lambda: self._show_update(upd))
+            else:
+                self.ui(lambda: self.set_status(f"You're on the latest version ({APP_VERSION})."))
+        threading.Thread(target=run, daemon=True).start()
+
+    def do_update(self):
+        upd = self.update_info
+        if not upd:
+            return
+        if not FROZEN:
+            messagebox.showinfo("Update", f"Version {upd.version} is on GitHub:\n{updater.RELEASES_PAGE}\n\n(Running from source - update with git pull.)", parent=self)
+            return
+        if not messagebox.askyesno("Update", f"Install Tenant Launcher {upd.version} now?\n\nThe app will close, update and reopen. "
+                                   "Open browser windows are not affected.", parent=self):
+            return
+        self.update_btn.state(["disabled"])
+        self.progress.pack(side="right"); self.progress["value"] = 0
+
+        def prog(done, total):
+            pct = int(done * 100 / total) if total else 0
+            self.ui(lambda: (self.progress.config(value=pct), self.set_status(f"Downloading {upd.version}... {pct}%")))
+
+        def run():
+            try:
+                path = updater.download(upd, prog)
+            except Exception as e:
+                self.ui(lambda m=_errmsg(e): (self.set_status(m), self.progress.pack_forget(), self.update_btn.state(["!disabled"])))
+                return
+            self.ui(lambda: self._run_installer(path))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _run_installer(self, path: Path):
+        self.set_status("Installing... the app will reopen in a moment.")
+        updater.install_and_restart(path)
+        self.after(400, self.destroy)
 
 
 if __name__ == "__main__":
