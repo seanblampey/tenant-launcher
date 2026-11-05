@@ -40,10 +40,10 @@ exists an **Update to x.y.z** button appears; it downloads the installer, runs i
 reopens the app. Installing any version over another also works by hand; your customer list,
 settings, Bitwarden sign-in and browser sessions are kept.
 
-The check needs to read this repo's releases. While the repo is **private** that requires a
-read-only GitHub token on each PC: put it in `%LOCALAPPDATA%\TenantLauncher\settings.json` as
-`"github_token": "github_pat_..."` (fine-grained token, Contents: read-only, this repo only).
-Making the repo public removes that step.
+The repo is public, so the check needs no credentials. (If it were ever made private again, a
+read-only GitHub token can be given per PC in `%LOCALAPPDATA%\TenantLauncher\settings.json` as
+`"github_token"`.) Because the repo is public, never commit customer lists, screenshots with
+customer names, tokens or vault data; `.gitignore` already excludes the usual ones.
 
 ## Look and feel
 
