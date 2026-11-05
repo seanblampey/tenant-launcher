@@ -20,6 +20,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\TenantLauncher.exe
+SetupIconFile=assets\icon.ico
 CloseApplications=yes
 
 [Tasks]

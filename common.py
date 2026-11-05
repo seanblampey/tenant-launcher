@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 FROZEN = bool(getattr(sys, "frozen", False))
 
 # Source checkout: files live next to the scripts. Installed exe: exe folder (read-only) + per-user data dir.
@@ -39,6 +39,12 @@ EDGE_PATHS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 ]
+
+
+def resource_path(rel: str) -> Path:
+    """A bundled file (assets/...): PyInstaller's _internal when frozen, else the source folder."""
+    base = Path(getattr(sys, "_MEIPASS", ROOT)) if FROZEN else ROOT
+    return base / rel
 
 
 def browser_channel() -> str:

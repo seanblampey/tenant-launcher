@@ -15,7 +15,7 @@ from tkinter import messagebox, ttk
 
 import bw
 from common import (APP_VERSION, CSV_PATH, DEFAULT_ITEM_PREFIX, FROZEN, PORTALS, ROOT, Customer,
-                    load_customers, load_settings, save_customers, save_settings)
+                    load_customers, load_settings, resource_path, save_customers, save_settings)
 
 PYTHONW = Path(sys.executable).with_name("pythonw.exe")
 if not PYTHONW.exists():
@@ -128,6 +128,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"Tenant Launcher {APP_VERSION}")
+        try:
+            self.iconbitmap(default=str(resource_path("assets/icon.ico")))
+        except Exception:
+            pass
         self.geometry("600x560")
         self.minsize(480, 400)
         self.session: str | None = None

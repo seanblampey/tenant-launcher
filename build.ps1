@@ -35,6 +35,8 @@ Invoke-Native 'PyInstaller' {
         --collect-all playwright `
         --hidden-import pyotp `
         --add-data "customers.example.csv;." `
+        --add-data "assets\icon.ico;assets" `
+        --icon "assets\icon.ico" `
         --add-binary "bin\bw.exe;bin" `
         --log-level WARN `
         tenant_launcher.py
