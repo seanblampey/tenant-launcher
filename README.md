@@ -49,6 +49,24 @@ customer names, tokens or vault data; `.gitignore` already excludes the usual on
 
 Light and dark themes (button in the header, remembered per user).
 
+The list is grouped into **Favourites** (right-click a customer, Pin), **Recent** (last five
+launched) and **All customers**. The **Saved session** column shows whether a signed-in browser
+profile exists for that tenant and when it was last used (green = will go straight in,
+amber = getting close to the purge age, none = will sign in from scratch).
+
+**Right-click a customer** for: Open in (any portal), Pin / Unpin, Forget saved session,
+Open sign-in log, Copy username, Copy tenant domain, Remove from list.
+
+**Sessions** menu (bottom right): forget the selected or all saved sessions, purge sessions
+unused for N days (default 60, runs automatically on start, both adjustable), open the
+sessions folder, and open the launch history.
+
+## Launch history
+
+Every launch appends one line to `%LOCALAPPDATA%\TenantLauncher\launches.csv`:
+time, Bitwarden user, customer, portal, result. Handy for "who was in that tenant on
+Tuesday". It is per PC; the Bitwarden user column says which teammate it was.
+
 ## What the sign-in automation does
 
 It watches the Microsoft sign-in page and fills whatever step appears:

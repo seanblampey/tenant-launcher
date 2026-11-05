@@ -20,7 +20,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 
 import bw
-from common import PORTALS, PROFILES_DIR, browser_channel, find_customer
+from common import PORTALS, PROFILES_DIR, append_audit, browser_channel, find_customer
 
 MS_LOGIN_HOSTS = re.compile(r"https://(login\.microsoftonline\.com|login\.microsoft\.com|login\.live\.com|"
                             r"login\.windows\.net|login\.microsoftonline\.us|device\.login\.microsoftonline\.com)", re.I)
@@ -346,9 +346,10 @@ def main() -> int:
         if result == "interrupt":
             log("Microsoft wants something from this account before the portal (MFA setup, "
                 "password change, terms of use...). Finish it in the browser; the session is kept.")
+        password = None
+        append_audit(os.environ.get("TL_BW_USER", ""), cust.name, args.portal, result)
         if result not in ("ok", "already", "manual", "closed", "interrupt"):
             messagebox.showwarning("Tenant Launcher", f"{cust.name}: {result}\n\nFinish signing in manually.", parent=root)
-        password = None
 
         # Keep the profile open until the user closes the browser window.
         # wait_for_event keeps Playwright's loop running, so tabs the page opens (Exchange,

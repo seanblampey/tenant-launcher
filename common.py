@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 FROZEN = bool(getattr(sys, "frozen", False))
 
 # Source checkout: files live next to the scripts. Installed exe: exe folder (read-only) + per-user data dir.
@@ -103,6 +103,92 @@ def save_customers(customers: list[Customer]) -> None:
         w.writerow(["Name", "BitwardenItem", "Notes"])
         for c in customers:
             w.writerow([c.name, c.bitwarden_item, c.notes])
+
+
+# ---------- launch history (audit trail) ----------
+AUDIT_PATH = DATA_DIR / "launches.csv"
+AUDIT_HEADER = ["Time", "User", "Customer", "Portal", "Result"]
+
+
+def append_audit(user: str, customer: str, portal: str, result: str) -> None:
+    """One line per launch: who, which tenant, which portal, when, how it went."""
+    try:
+        import time
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        new = not AUDIT_PATH.exists()
+        with AUDIT_PATH.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(AUDIT_HEADER)
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), user, customer, portal, result])
+    except Exception:
+        pass
+
+
+def read_audit() -> list[dict]:
+    if not AUDIT_PATH.exists():
+        return []
+    try:
+        with AUDIT_PATH.open(newline="", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+    except Exception:
+        return []
+
+
+def last_launches() -> dict[str, str]:
+    """customer name -> most recent launch time ('YYYY-MM-DD HH:MM:SS')."""
+    out: dict[str, str] = {}
+    for row in read_audit():
+        name, t = row.get("Customer") or "", row.get("Time") or ""
+        if name and t >= out.get(name, ""):
+            out[name] = t
+    return out
+
+
+def recent_customers(n: int = 5) -> list[str]:
+    seen: list[str] = []
+    for row in reversed(read_audit()):
+        name = row.get("Customer") or ""
+        if name and name not in seen:
+            seen.append(name)
+        if len(seen) >= n:
+            break
+    return seen
+
+
+# ---------- saved browser sessions ----------
+def session_exists(c: Customer) -> bool:
+    """True when the customer's Chrome profile has cookies (i.e. a saved sign-in to reuse)."""
+    return (c.profile_dir / "Default" / "Cookies").exists() or (c.profile_dir / "Default" / "Network" / "Cookies").exists()
+
+
+def session_age_days(c: Customer) -> float | None:
+    """Days since the profile was last used (by its cookie file's mtime), or None if no session."""
+    import time
+    for p in (c.profile_dir / "Default" / "Network" / "Cookies", c.profile_dir / "Default" / "Cookies"):
+        if p.exists():
+            return (time.time() - p.stat().st_mtime) / 86400
+    return None
+
+
+def forget_session(c: Customer) -> None:
+    """Delete the customer's Chrome profile. Raises OSError if a browser still has it open."""
+    import shutil
+    if c.profile_dir.exists():
+        shutil.rmtree(c.profile_dir)
+
+
+def purge_unused_sessions(customers: list[Customer], older_than_days: int) -> list[str]:
+    """Delete profiles not used for N days. Returns the names purged (open ones are skipped)."""
+    purged = []
+    for c in customers:
+        age = session_age_days(c)
+        if age is not None and age > older_than_days:
+            try:
+                forget_session(c); purged.append(c.name)
+            except OSError:
+                pass
+    return purged
 
 
 def find_customer(query: str, customers: list[Customer] | None = None) -> Customer | None:

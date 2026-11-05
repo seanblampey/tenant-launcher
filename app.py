@@ -18,8 +18,9 @@ import ttkbootstrap as tb
 
 import bw
 import updater
-from common import (APP_VERSION, CSV_PATH, DATA_DIR, DEFAULT_ITEM_PREFIX, FROZEN, PORTALS, ROOT, Customer,
-                    load_customers, load_settings, resource_path, save_customers, save_settings)
+from common import (APP_VERSION, AUDIT_PATH, CSV_PATH, DATA_DIR, DEFAULT_ITEM_PREFIX, FROZEN, PORTALS, PROFILES_DIR,
+                    ROOT, Customer, forget_session, last_launches, load_customers, load_settings, purge_unused_sessions,
+                    recent_customers, resource_path, save_customers, save_settings, session_age_days, session_exists)
 
 PYTHONW = Path(sys.executable).with_name("pythonw.exe")
 if not PYTHONW.exists():
@@ -237,10 +238,12 @@ class App(tb.Window):
         self.items: dict[str, dict] = {}      # customer Login items by id, cached after sign-in
         self.customers: list[Customer] = []
         self.update_info: "updater.Update | None" = None
+        self.favourites: set[str] = set(self.settings.get("favourites", []))
         self._build()
         self.ui = UiQueue(self)
         self.reload()
         self.after(150, self.ensure_unlocked)
+        self.after(3000, self._auto_purge)
         threading.Thread(target=self._bg_update_check, daemon=True).start()
 
     # ---------- UI ----------
@@ -273,7 +276,7 @@ class App(tb.Window):
         tb.Label(srow, text="\U0001F50D").pack(side="left", padx=(0, 6))
         e = tb.Entry(srow, textvariable=self.search_var, font=("Segoe UI", 11)); e.pack(side="left", fill="x", expand=True)
         e.focus_set()
-        tb.Label(srow, text="  double-click a customer to open the M365 admin centre", bootstyle="secondary").pack(side="left")
+        tb.Label(srow, text="  double-click = M365 admin centre, right-click for more", bootstyle="secondary").pack(side="left")
 
         # bottom bands are packed first (side=bottom) so the list gets the leftover space
         sbar = tb.Frame(self, padding=(18, 4, 18, 8)); sbar.pack(side="bottom", fill="x")
@@ -283,14 +286,20 @@ class App(tb.Window):
 
         # list
         mid = tb.Frame(self, padding=(18, 0, 18, 0)); mid.pack(fill="both", expand=True)
-        self.tree = tb.Treeview(mid, columns=("item", "notes"), show="headings", selectmode="browse", bootstyle="primary")
-        self.tree.heading("item", text="Customer"); self.tree.heading("notes", text="Notes")
-        self.tree.column("item", width=320); self.tree.column("notes", width=260)
+        self.tree = tb.Treeview(mid, columns=("item", "session", "notes"), show="tree headings", selectmode="browse", bootstyle="primary")
+        self.tree.heading("#0", text=""); self.tree.column("#0", width=24, stretch=False)
+        self.tree.heading("item", text="Customer"); self.tree.heading("session", text="Saved session"); self.tree.heading("notes", text="Notes")
+        self.tree.column("item", width=300); self.tree.column("session", width=130, stretch=False); self.tree.column("notes", width=220)
         sb = tb.Scrollbar(mid, orient="vertical", command=self.tree.yview, bootstyle="round")
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", lambda _e: self.launch("admin"))
         self.tree.bind("<Return>", lambda _e: self.launch("admin"))
+        self.tree.bind("<Button-3>", self._context_menu)
+        self.tree.tag_configure("section", font=("Segoe UI", 10, "bold"))
+        self.tree.tag_configure("noitem", foreground="#999")
+        self.tree.tag_configure("live", foreground="#2e8b57")
+        self.tree.tag_configure("stale", foreground="#b8860b")
 
         # portals
         for i, (key, (label, _url)) in enumerate(PORTALS.items()):
@@ -313,6 +322,20 @@ class App(tb.Window):
         tb.Button(bottom, text="Remove", bootstyle="danger-outline", command=self.remove_selected).pack(side="left", padx=6)
         tb.Button(bottom, text="Edit list", bootstyle="secondary-outline", command=self.edit_csv).pack(side="left")
         tb.Button(bottom, text="Reload", bootstyle="secondary-outline", command=self.reload).pack(side="left", padx=6)
+        # Sessions menu: saved browser sign-ins and the launch history
+        self.auto_purge_var = tk.BooleanVar(value=bool(self.settings.get("auto_purge", True)))
+        smenu = tk.Menu(self, tearoff=False)
+        smenu.add_command(label="Forget saved session for selected", command=self.forget_selected_session)
+        smenu.add_command(label="Forget ALL saved sessions...", command=self.forget_all_sessions)
+        smenu.add_separator()
+        smenu.add_command(label=f"Purge sessions unused for {self.purge_days()} days now", command=lambda: self.purge_now(manual=True))
+        smenu.add_checkbutton(label="Auto-purge unused sessions on start", variable=self.auto_purge_var, command=self._save_auto_purge)
+        smenu.add_command(label="Change purge age...", command=self.change_purge_days)
+        smenu.add_separator()
+        smenu.add_command(label="Open launch history (CSV)", command=self.open_history)
+        smenu.add_command(label="Open sessions folder", command=lambda: os.startfile(PROFILES_DIR) if PROFILES_DIR.exists() else None)
+        self.sessions_menu = smenu
+        tb.Menubutton(bottom, text="Sessions", bootstyle="secondary-outline", menu=smenu).pack(side="right")
 
         # status bar
         self.status = tk.StringVar(value="Select a customer, then double-click or pick a portal.")
@@ -337,24 +360,197 @@ class App(tb.Window):
         self.customers = load_customers()
         self.refresh_list()
 
+    @staticmethod
+    def _age_text(days: float | None) -> str:
+        if days is None:
+            return "none"
+        if days < 1 / 24:
+            return "just now"
+        if days < 1:
+            return f"{int(days * 24)}h ago"
+        return f"{int(days)}d ago"
+
+    def _session_cell(self, c: Customer) -> tuple[str, str]:
+        """(text, tag) for the Saved session column."""
+        age = session_age_days(c)
+        if age is None:
+            return "none", ""
+        stale = age > self.purge_days() * 0.75
+        return f"● {self._age_text(age)}", ("stale" if stale else "live")
+
     def refresh_list(self):
         q = self.search_var.get().strip().lower()
+        keep_sel = self.selected()
         self.tree.delete(*self.tree.get_children())
-        for c in sorted(self.customers, key=lambda c: c.name.lower()):
-            if q and q not in c.name.lower() and q not in c.notes.lower():
+        by_name = {c.name: c for c in self.customers}
+
+        def matches(c: Customer) -> bool:
+            return not q or q in c.name.lower() or q in c.notes.lower()
+
+        def insert_row(parent: str, prefix: str, c: Customer):
+            sess, stag = self._session_cell(c)
+            tags = tuple(t for t in (stag, "" if c.bitwarden_item else "noitem") if t)
+            star = "★ " if c.name in self.favourites else ""
+            notes = c.notes or ("(no Bitwarden item)" if not c.bitwarden_item else "")
+            self.tree.insert(parent, "end", iid=f"{prefix}:{c.name}", values=(star + c.name, sess, notes), tags=tags)
+
+        favs = [by_name[n] for n in sorted(self.favourites, key=str.lower) if n in by_name and matches(by_name[n])]
+        recent = [by_name[n] for n in recent_customers(5) if n in by_name and matches(by_name[n])]
+        rest = [c for c in sorted(self.customers, key=lambda c: c.name.lower()) if matches(c)]
+        sections = [("fav", "★ Favourites", favs), ("rec", "Recent", recent), ("all", f"All customers ({len(rest)})", rest)]
+        first = None
+        for key, label, rows in sections:
+            if not rows:
                 continue
-            tag = "" if c.bitwarden_item else "noitem"
-            self.tree.insert("", "end", iid=c.name, values=(c.name, c.notes or ("(no Bitwarden item)" if not c.bitwarden_item else "")), tags=(tag,))
-        self.tree.tag_configure("noitem", foreground="#999")
-        kids = self.tree.get_children()
-        if kids:
-            self.tree.selection_set(kids[0]); self.tree.focus(kids[0])
+            sec = self.tree.insert("", "end", iid=f"sec:{key}", text="", values=(label, "", ""), tags=("section",), open=True)
+            for c in rows:
+                insert_row(sec, key, c)
+                first = first or f"{key}:{c.name}"
+        # restore the previous selection if it is still visible, else select the first row
+        target = None
+        if keep_sel:
+            for key in ("fav", "rec", "all"):
+                if self.tree.exists(f"{key}:{keep_sel.name}"):
+                    target = f"{key}:{keep_sel.name}"; break
+        target = target or first
+        if target:
+            self.tree.selection_set(target); self.tree.focus(target)
 
     def selected(self) -> Customer | None:
         sel = self.tree.selection()
-        if not sel:
+        if not sel or ":" not in sel[0] or sel[0].startswith("sec:"):
             return None
-        return next((c for c in self.customers if c.name == sel[0]), None)
+        name = sel[0].split(":", 1)[1]
+        return next((c for c in self.customers if c.name == name), None)
+
+    # ---------- context menu, favourites, sessions ----------
+    def _context_menu(self, event):
+        row = self.tree.identify_row(event.y)
+        if not row or row.startswith("sec:"):
+            return
+        self.tree.selection_set(row); self.tree.focus(row)
+        c = self.selected()
+        if not c:
+            return
+        m = tk.Menu(self, tearoff=False)
+        openin = tk.Menu(m, tearoff=False)
+        for key, (label, _u) in PORTALS.items():
+            openin.add_command(label=label, command=lambda k=key: self.launch(k))
+        m.add_cascade(label="Open in", menu=openin)
+        m.add_command(label="Unpin from favourites" if c.name in self.favourites else "Pin to favourites", command=self.toggle_favourite)
+        m.add_separator()
+        has = session_exists(c)
+        m.add_command(label="Forget saved session" + ("" if has else " (none)"), state="normal" if has else "disabled",
+                      command=self.forget_selected_session)
+        m.add_command(label="Open sign-in log", command=self.open_log)
+        m.add_separator()
+        m.add_command(label="Copy username", command=lambda: self.copy_field(c, "username"))
+        m.add_command(label="Copy tenant domain", command=lambda: self.copy_field(c, "domain"))
+        m.add_separator()
+        m.add_command(label="Remove from list", command=self.remove_selected)
+        m.tk_popup(event.x_root, event.y_root)
+
+    def toggle_favourite(self):
+        c = self.selected()
+        if not c:
+            return
+        if c.name in self.favourites:
+            self.favourites.discard(c.name)
+        else:
+            self.favourites.add(c.name)
+        self.settings["favourites"] = sorted(self.favourites); save_settings(self.settings)
+        self.refresh_list()
+
+    def purge_days(self) -> int:
+        try:
+            return max(0, int(self.settings.get("purge_days", 60)))
+        except (TypeError, ValueError):
+            return 60
+
+    def _save_auto_purge(self):
+        self.settings["auto_purge"] = bool(self.auto_purge_var.get()); save_settings(self.settings)
+
+    def change_purge_days(self):
+        from tkinter import simpledialog
+        v = simpledialog.askinteger("Purge age", "Forget saved sessions not used for how many days?\n(0 = never purge automatically)",
+                                    initialvalue=self.purge_days(), minvalue=0, maxvalue=3650, parent=self)
+        if v is None:
+            return
+        self.settings["purge_days"] = v; save_settings(self.settings)
+        self.sessions_menu.entryconfig(3, label=f"Purge sessions unused for {v} days now")
+        self.refresh_list()
+
+    def _auto_purge(self):
+        if self.auto_purge_var.get() and self.purge_days() > 0:
+            self.purge_now(manual=False)
+
+    def purge_now(self, manual: bool):
+        days = self.purge_days()
+        if days <= 0:
+            if manual:
+                self.set_status("Purge age is 0 - automatic purge is off.")
+            return
+        purged = purge_unused_sessions(self.customers, days)
+        if purged or manual:
+            self.set_status(f"Purged {len(purged)} saved session(s) unused for more than {days} days.")
+        if purged:
+            self.refresh_list()
+
+    def forget_selected_session(self):
+        c = self.selected()
+        if not c:
+            return
+        if not session_exists(c):
+            self.set_status(f"{c.name}: no saved session."); return
+        if not messagebox.askyesno("Forget session", f"Forget the saved browser session for '{c.name}'?\nThe next launch signs in from scratch.", parent=self):
+            return
+        try:
+            forget_session(c)
+            self.set_status(f"Forgot saved session for {c.name}.")
+        except OSError:
+            messagebox.showwarning("Tenant Launcher", f"Can't delete it while a browser window for '{c.name}' is open. Close it and try again.", parent=self)
+        self.refresh_list()
+
+    def forget_all_sessions(self):
+        n = sum(1 for c in self.customers if session_exists(c))
+        if not n:
+            self.set_status("No saved sessions."); return
+        if not messagebox.askyesno("Forget all sessions", f"Forget ALL {n} saved browser session(s)?\nEvery customer will sign in from scratch next time.", parent=self):
+            return
+        done = skipped = 0
+        for c in self.customers:
+            if session_exists(c):
+                try:
+                    forget_session(c); done += 1
+                except OSError:
+                    skipped += 1
+        self.set_status(f"Forgot {done} session(s)." + (f" {skipped} skipped (browser still open)." if skipped else ""))
+        self.refresh_list()
+
+    def open_log(self):
+        c = self.selected()
+        if not c:
+            return
+        p = PROFILES_DIR / f"{c.slug}.log"
+        if p.exists():
+            os.startfile(p)
+        else:
+            self.set_status(f"{c.name}: no sign-in log yet.")
+
+    def open_history(self):
+        if AUDIT_PATH.exists():
+            os.startfile(AUDIT_PATH)
+        else:
+            self.set_status("No launches recorded yet.")
+
+    def copy_field(self, c: Customer, what: str):
+        item = self.cached_item(c)
+        user = ((item or {}).get("login") or {}).get("username") or ""
+        if not user:
+            self.set_status("Username not available (vault not loaded yet)."); return
+        value = user.split("@", 1)[1] if what == "domain" and "@" in user else user
+        self.clipboard_clear(); self.clipboard_append(value)
+        self.set_status(f"Copied {what}: {value}")
 
     def edit_csv(self):
         if not CSV_PATH.exists():
@@ -530,8 +726,9 @@ class App(tb.Window):
             return
         if not self.ensure_unlocked():
             return
-        env = dict(os.environ); env["BW_SESSION"] = self.session
+        env = dict(os.environ); env["BW_SESSION"] = self.session; env["TL_BW_USER"] = self.user_email
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        self.after(20000, self.refresh_list)        # pick up the new session / recent entry once the worker is done
         item = self.cached_item(c)
         if FROZEN:
             cmd = [sys.executable, "--customer", c.name, "--portal", portal]
