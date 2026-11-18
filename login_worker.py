@@ -219,6 +219,18 @@ def auto_login(page, username: str, password: str, get_totp, log, timeout: int =
     return "manual"
 
 
+def use_native_downloads(ctx, page, log) -> None:
+    """Hand downloads back to the browser so they land in the Downloads folder under their real name.
+
+    Playwright takes downloads over by default: every file is saved under a GUID name in a temp
+    folder that is wiped when the browser closes, so nothing ever reaches Downloads. The setting is
+    per browser profile, so this one call covers every tab and popup, and outlives this first tab."""
+    try:
+        ctx.new_cdp_session(page).send("Browser.setDownloadBehavior", {"behavior": "default"})
+    except Exception as e:
+        log(f"could not restore normal downloads: {e}")
+
+
 def ask_master_password(parent) -> str | None:
     return simpledialog.askstring("Bitwarden", "Bitwarden master password:", show="*", parent=parent)
 
@@ -306,6 +318,7 @@ def main() -> int:
             args=["--start-maximized", "--disable-infobars", "--no-first-run", "--no-default-browser-check"],
         )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        use_native_downloads(ctx, page, log)
         log(f"browser up, opening {label}")
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
