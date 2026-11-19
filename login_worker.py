@@ -219,16 +219,20 @@ def auto_login(page, username: str, password: str, get_totp, log, timeout: int =
     return "manual"
 
 
-def use_native_downloads(ctx, page, log) -> None:
-    """Hand downloads back to the browser so they land in the Downloads folder under their real name.
+def use_native_downloads(ctx, page, log) -> bool:
+    """Hand downloads back to the browser so they follow its normal download settings.
 
     Playwright takes downloads over by default: every file is saved under a GUID name in a temp
     folder that is wiped when the browser closes, so nothing ever reaches Downloads. The setting is
-    per browser profile, so this one call covers every tab and popup, and outlives this first tab."""
+    per browser profile, so this one call covers every tab and popup. The CDP session belongs to this
+    first tab; if it closes, Chromium resets the session's override to "default", which is the same
+    behaviour, so downloads keep working. Returns False if the override could not be applied."""
     try:
         ctx.new_cdp_session(page).send("Browser.setDownloadBehavior", {"behavior": "default"})
+        return True
     except Exception as e:
         log(f"could not restore normal downloads: {e}")
+        return False
 
 
 def ask_master_password(parent) -> str | None:
@@ -318,7 +322,9 @@ def main() -> int:
             args=["--start-maximized", "--disable-infobars", "--no-first-run", "--no-default-browser-check"],
         )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        use_native_downloads(ctx, page, log)
+        if not use_native_downloads(ctx, page, log):
+            messagebox.showwarning("Tenant Launcher", f"{cust.name}: files downloaded in this browser window "
+                                   "won't be kept (they are deleted when it closes).", parent=root)
         log(f"browser up, opening {label}")
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=60000)

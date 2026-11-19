@@ -144,8 +144,8 @@ keeps it in `%LOCALAPPDATA%\TenantLauncher\customers.csv`. Both are `Name,Bitwar
 
 ## Worth knowing
 
-* Downloads from a tenant window (exports, reports, CSVs) go to your normal Downloads folder
-  under their real file name, the same as in everyday Chrome.
+* Downloads from a tenant window (exports, reports, CSVs) follow the browser's normal download
+  settings for that tenant's profile (your Downloads folder, under their real file name, by default).
 * Sessions last as long as the tenant's sign-in frequency / token policy allows. Conditional
   access policies that require a compliant device or block the login still apply.
 * Bitwarden accounts protected by a hardware key other than YubiKey OTP, or by Duo, can't sign
