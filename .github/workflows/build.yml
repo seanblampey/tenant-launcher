@@ -34,6 +34,10 @@ jobs:
         run: |
           $v = (Select-String -Path common.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
           "version=$v" >> $env:GITHUB_OUTPUT
+          if ("$env:GITHUB_REF" -like 'refs/tags/v*' -and "$env:GITHUB_REF_NAME" -ne "v$v") {
+            Write-Error "Tag $env:GITHUB_REF_NAME does not match APP_VERSION $v in common.py - bump APP_VERSION and tag v$v."
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:
